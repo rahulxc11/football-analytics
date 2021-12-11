@@ -1,0 +1,453 @@
+---
+title: "Squad Age Profile"
+output: html_notebook
+---
+
+Libraries
+
+```{r}
+library(ggforce)
+library(tidyverse)
+library(worldfootballR)
+
+pacman::p_load(tidyverse, polite, scales, ggimage, rvest, 
+               glue, extrafont, showtext, ggrepel, magick, 
+               ggforce, ggtext, lubridate, 
+               cowplot, patchwork, rlang, cowplot)
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(ggforce)
+library(magick)
+library(scales)
+```
+
+Get URLs from Leagues
+
+```{r}
+team_links_df <- tibble(team_name=character(),team_num=character(),season=double(),link=character(),league=character(),abb=character())
+
+get_team_links <- function(season,league,abb) {
+  
+  url <- paste("https://www.transfermarkt.com/",league,"/startseite/wettbewerb/",abb,"/plus/?saison_id=",season,sep="")
+
+
+  session <- bow(url)
+  
+  
+  team_links <- scrape(session) %>% 
+    html_nodes("#yw1 > table > tbody > tr > td.zentriert.no-border-rechts > a") %>% 
+    html_attr("href")
+  
+  team_links  
+  # season <- enquo(season)
+ 
+  
+   
+  team_links_pre <- tibble(team_links %>% 
+    enframe(name = NULL) %>% 
+    separate(value, c(NA, "team_name", NA, NA, "team_num", NA, NA), sep = "/") %>% mutate(season=season)  %>%
+    mutate(link = paste("https://www.transfermarkt.com/",team_name,"/leistungsdaten/verein/",team_num,"/reldata/%26",
+                             season,"/plus/1",sep=""),league=league,abb=abb)  )
+  
+team_links_df <<- bind_rows(team_links_df,team_links_pre)  
+}
+
+get_team_links(season = 2021,league="premier-league",abb="GB1")
+get_team_links(season = 2021,league="primera-division",abb="ES1")
+get_team_links(season = 2021,league="1-bundesliga",abb="L1")
+get_team_links(season = 2021,league="serie-a",abb="IT1")
+get_team_links(season = 2021,league="ligue-1",abb="FR1")
+
+
+team_links_df %>% write_csv("team_links_df.csv")
+```
+
+
+Function to get required data i.e. players, DOB, Debut
+
+
+```{r}
+
+buli_age_utility_info <- function(team_name, team_num, season, league, abb) {
+  ## get age + minutes played
+
+ session <- bow(glue::glue("https://www.transfermarkt.com/{team_name}/leistungsdaten/verein/{team_num}/reldata/%26{season}/plus/1"))
+  
+  # grab name from photo element instead
+  result_name <- scrape(session) %>% 
+    html_nodes("#yw1 .bilderrahmen-fixed") %>% 
+    html_attr("title") 
+  
+
+check <- scrape(session) %>% 
+    html_nodes(".content") %>% html_text()
+
+matches_played <- parse_number(check[2])
+
+
+
+team_name_correct <- scrape(session) %>% 
+    html_nodes("span") %>% html_text()
+
+team_name_correct <- team_name_correct[4]
+
+
+  # grab age
+  result_age <- scrape(session) %>% 
+    html_nodes(".posrela+ .zentriert") %>% 
+    html_text()
+
+
+  # grab minutes played in league
+  result_mins <- scrape(session) %>% 
+    html_nodes("td.rechts") %>% 
+    html_text()
+  
+  ## get length
+  session <- bow(glue::glue("https://www.transfermarkt.com/{team_name}/kader/verein/{team_num}/saison_id/{season}/plus/1"))
+  
+  result_name2 <- scrape(session) %>% 
+    html_nodes("#yw1 .bilderrahmen-fixed") %>% 
+    html_attr("title") 
+  
+  
+  result_bday <- scrape(session) %>% 
+    html_nodes(".posrela+ .zentriert") %>% 
+    html_text()
+  
+  result_joinedteam <- scrape(session) %>% 
+    html_nodes("td:nth-child(7)") %>% 
+    html_text()
+  
+  result_leaveteam <- scrape(session) %>% 
+    html_nodes("td:nth-child(9)") %>% 
+    html_text()
+  
+  # place each vector into list
+  resultados <- list(result_name, result_age, result_mins)
+  
+  col_name <- c("name", "age", "minutes")
+  
+  results_comb <- resultados %>% 
+    reduce(cbind) %>% 
+    as_tibble() %>% 
+    set_names(col_name)
+  
+  ## join + bday
+  resultados2 <- list(result_name2, result_bday, 
+                      result_joinedteam, result_leaveteam)
+  
+  col_name2 <- c("name", "bday", "join", "leave")
+  
+  results_comb2 <- resultados2 %>% 
+    reduce(cbind) %>% 
+    as_tibble() %>% 
+    set_names(col_name2)
+  
+  ## combine BOTH
+  results_comb <- results_comb %>% 
+    left_join(results_comb2) 
+  
+  # fix "strings" into proper formats, calculate % of minutes appeared
+  all_team_minutes <- results_comb %>% mutate(team=team_name,matches_played,team_name_correct,
+                                              league,abb)
+  
+  return(all_team_minutes)
+}
+
+age_utility_df_ALL <- pmap(list(team_links_df$team_name, 
+                                team_links_df$team_num,
+                                team_links_df$season,
+                                team_links_df$league,
+                                team_links_df$abb
+                                ),
+                           .f = buli_age_utility_info)
+buli_age_utility_df <- age_utility_df_ALL %>% 
+  reduce(rbind)
+ 
+buli_age_utility_df %>% group_by(league) %>% summarise(n_distinct(team))
+
+
+glimpse(buli_age_utility_df)
+
+
+#buli_age_utility_df %>% write_csv("buli_age_utility_df.csv")
+```
+
+
+More data processing
+
+```{r}
+buli_age_utility_df_1 <- buli_age_utility_df %>%
+mutate(age = as.numeric(age),
+           minutes = minutes %>% 
+             str_replace("\\.", "") %>% 
+             str_replace("'", "") %>% 
+             as.numeric(),
+           bday = str_replace_all(bday, "\\(.*\\)", "") %>% mdy(),
+           join = join %>% mdy(),
+           join_age = interval(bday, join) / years(1),
+       ## IMPORTANT!!!! this will change for earlier seasons, age_now
+           age_now = interval(bday, Sys.Date()) / years(1)) %>% 
+    filter(!is.na(minutes)) %>% 
+    separate(name, into = c("first_name", "last_name"), 
+             sep = " ", fill = "left") %>%
+    mutate(
+      fname = if_else(!is.na(first_name), 
+                      str_extract(first_name, "[A-Z]{1}"),
+                      ""),
+      player = case_when(
+        !is.na(first_name) ~ glue("{fname}. {last_name}"),
+        TRUE ~ last_name))
+
+
+buli_age_utility_df_2 <- buli_age_utility_df_1 %>% group_by(team) %>% summarise(max_minutes = max(minutes))
+
+buli_age_utility_df_3 <- buli_age_utility_df_1 %>% left_join(buli_age_utility_df_2) %>% 
+  mutate(tot_mins = ifelse(is.na(matches_played),max_minutes,matches_played*90)) %>%
+  mutate(min_perc = (minutes / tot_mins) %>% round(digits = 3))
+
+
+buli_age_utility_df_4 <- distinct(buli_age_utility_df_3)
+```
+
+
+Function for generating Charts
+
+
+```{r}
+get_charts <- function (team_name, team_num)
+  
+{
+  
+
+squad_data<-buli_age_utility_df_4 %>% mutate(new_signing = ifelse(join > '2021-05-01',"Yes","No")) %>% filter(!is.na(age_now),
+                               team == team_name)
+
+
+player_plot <- squad_data %>%
+  ggplot(aes(x=age_now,y=min_perc,color=new_signing)) + 
+  geom_link(aes(xend=join_age,yend=min_perc,
+                alpha = -stat(index)),lineend = "round",
+            show.legend = F) + geom_point() + 
+  geom_text_repel(aes(label = last_name), 
+                  size = 3.5, 
+                  colour = "white") +
+  labs(x = "Age",
+       title = paste0(squad_data %>% distinct(team_name_correct)
+, " | Squad Age Profile"), 
+       subtitle = paste0(squad_data %>% distinct(league), " | Season ", "2021/2022 as of ", format(Sys.Date(),"%m/%d/%Y")),
+       caption = paste0("@rahulxc", " | Data: ", "Transfermarkt"),
+       colour = "New Signing?") +
+  scale_y_continuous("Share of minutes played", 
+                     labels = scales::percent_format(accuracy = 1), 
+                     breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  expand_limits(x = c(16, 40), y = c(0, 1)) +
+  annotate("rect", 
+           xmin = 24,
+           xmax = 29,
+           ymin = -Inf,
+           ymax = 1,
+           alpha = 0.5,
+           fill = "mediumseagreen") +
+  annotate("text", 
+           x = 26.5, 
+           y = 1.05, 
+           label = "Peak Years", 
+           colour = "mediumseagreen", 
+           alpha = 0.7,
+           size = 5) + theme_minimal() +
+   theme(legend.position = "right", 
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "#141622"),
+        panel.background = element_rect(fill = "#141622", 
+                                        colour = "#141622",
+                                        size = 2, 
+                                        linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, 
+                                        linetype = 'solid',
+                                        colour = "gray30"),
+        axis.title.x = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.title.y = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.text.x = element_text(colour = "white"),
+        axis.text.y = element_text(colour = "white"),
+        plot.title = element_text(face = "bold", 
+                                  colour = "white", 
+                                  size = 14),
+        plot.subtitle = element_text(colour = "white", 
+                                     size = 10),
+        plot.caption = element_text(colour = "white", 
+                                    size = 10),
+        plot.caption.position = "plot",
+        legend.title = element_text(colour = "white", 
+                                    size = 14),
+        legend.text = element_text(colour = "white", 
+                                   size = 14))  
+
+player_plot  
+
+
+session <- bow(glue("https://www.transfermarkt.com/{team_name}/leistungsdaten/verein/{team_num}/reldata/%262021/plus/1"))
+
+
+links <- scrape(session) %>% 
+    html_elements("img") %>%
+  html_attr("src")
+
+image_link <- as.tibble(links) %>% filter(grepl("/head/",value),grepl("images",value))
+
+
+logo <- image_read(image_link$value) 
+
+
+logo2 <- image_read("https://gcdn.pbrd.co/images/cV3BnBZcIuf9.png?o=1")
+
+ggdraw(player_plot) + 
+  draw_image(logo, x = 1, y = 1, hjust = 1, vjust = 1, width = 0.13, height = 0.2) +
+  draw_image(logo2, x = 0.8, y = 0,width=0.2,height=0.4)
+
+ggsave(glue("{team_name}_Squad_Age_Profile.png"),width=9,height=7,path="Documents/squad_profile")
+  
+}
+```
+
+Get charts and save
+
+```{r}
+mapply(get_charts,
+team_links_df$team_name,
+team_links_df$team_num)
+
+```
+
+Example with Bayern Munich
+
+```{r}
+squad_data<-buli_age_utility_df_4 %>% mutate(new_signing = ifelse(join > '2021-05-01',"Yes","No")) %>% filter(!is.na(age_now),
+                               team_name_correct %in% c("Bayern Munich"))
+
+
+player_plot <- squad_data %>%
+  ggplot(aes(x=age_now,y=min_perc,color=new_signing)) + 
+  geom_link(aes(xend=join_age,yend=min_perc,
+                alpha = -stat(index)),lineend = "round",
+            show.legend = F) + geom_point() + 
+  geom_text_repel(aes(label = last_name), 
+                  size = 3.5, 
+                  colour = "white") +
+  labs(x = "Age",
+       title = paste0(squad_data %>% distinct(team_name_correct)
+, " | Squad Age Profile"), 
+       subtitle = paste0(squad_data %>% distinct(league), " | Season ", "2021/2022 as of ", format(Sys.Date(),"%m/%d/%Y")),
+       caption = paste0("@rahulxc", " | Data: ", "Transfermarkt"),
+       colour = "New Signing?") +
+  scale_y_continuous("Share of minutes played", 
+                     labels = scales::percent_format(accuracy = 1), 
+                     breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  expand_limits(x = c(16, 40), y = c(0, 1)) +
+  annotate("rect", 
+           xmin = 24,
+           xmax = 29,
+           ymin = -Inf,
+           ymax = 1,
+           alpha = 0.5,
+           fill = "mediumseagreen") +
+  annotate("text", 
+           x = 26.5, 
+           y = 1.05, 
+           label = "Peak Years", 
+           colour = "mediumseagreen", 
+           alpha = 0.7,
+           size = 5) + theme_minimal() +
+   theme(legend.position = "right", 
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "#141622"),
+        panel.background = element_rect(fill = "#141622", 
+                                        colour = "#141622",
+                                        size = 2, 
+                                        linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, 
+                                        linetype = 'solid',
+                                        colour = "gray30"),
+        axis.title.x = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.title.y = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.text.x = element_text(colour = "white"),
+        axis.text.y = element_text(colour = "white"),
+        plot.title = element_text(face = "bold", 
+                                  colour = "white", 
+                                  size = 14),
+        plot.subtitle = element_text(colour = "white", 
+                                     size = 10),
+        plot.caption = element_text(colour = "white", 
+                                    size = 10),
+        plot.caption.position = "plot",
+        legend.title = element_text(colour = "white", 
+                                    size = 14),
+        legend.text = element_text(colour = "white", 
+                                   size = 14))
+```
+
+
+
+Playing around with positions!! Incomplete
+
+```{r}
+team_name <- "leicester-city"
+team_num <- "1003"
+
+
+session <- bow(glue("https://www.transfermarkt.com/{team_name}/leistungsdaten/verein/{team_num}/reldata/%262021/plus/1"))
+
+
+test123 <- scrape(session) %>% 
+    html_elements(".posrela") %>%
+  html_text()
+
+positions <- c("Goalkeeper",
+               "Centre-Back",
+               "Right-Back",
+               "Left-Back",
+               "Defensive Midfield",
+               "Central Midfield",
+               "Attacking Midfield",
+               "Left Midfield",
+               "Right Midfield",
+               "Centre-Forward",
+               "Second Striker",
+               "Left Winger",
+               "Right Winger")
+
+positions <-
+tibble::tribble(
+             ~position, ~broad_position, ~abbr,
+          "Goalkeeper",    "Goalkeeper",  "GK",
+         "Centre-Back",       "Defense",  "CB",
+          "Right-Back",       "Defense",  "RB",
+           "Left-Back",       "Defense",  "LB",
+  "Defensive Midfield",      "Midfield",  "DM",
+    "Central Midfield",      "Midfield",  "CM",
+  "Attacking Midfield",      "Midfield",  "AM",
+       "Left Midfield",      "Midfield",  "LM",
+      "Right Midfield",      "Midfield",  "RM",
+      "Centre-Forward",       "Forward",  "CF",
+      "Second Striker",       "Forward",  "SS",
+         "Left Winger",       "Forward",  "LW",
+        "Right Winger",       "Forward",  "RW"
+  )
+
+```
+
+
+```{r}
+
+```
+
