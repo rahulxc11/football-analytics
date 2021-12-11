@@ -1,0 +1,405 @@
+---
+title: "CONCACAF Squad Age Profile"
+output: html_notebook
+---
+
+
+```{r}
+library(ggforce)
+library(tidyverse)
+library(worldfootballR)
+
+pacman::p_load(tidyverse, polite, scales, ggimage, rvest, 
+               glue, extrafont, showtext, ggrepel, magick, 
+               ggforce, ggtext, lubridate, 
+               cowplot, patchwork, rlang, cowplot)
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(ggforce)
+library(magick)
+library(scales)
+```
+
+
+Get Concacaf Links
+
+```{r}
+concacaf <- bow("https://fbref.com/en/comps/3/schedule/WCQ----CONCACAF-M-Scores-and-Fixtures")
+
+concacaf_links <- scrape(concacaf) %>% 
+    html_nodes(".center") %>% html_children() %>% html_attr("href") 
+
+concacaf_lineups <- get_match_lineups(match_url = concacaf_links)
+
+# 165:195 only limits this to final round of qualifiers
+concacaf_links <-paste("https://fbref.com",concacaf_links,sep="")[165:195]
+
+
+# Get match lineups
+concacaf_lineups <- get_match_lineups(match_url = concacaf_links)
+
+```
+
+
+Get Player Links from Transfermarkt for debuts! Very hacky process, see if there's somethign better
+
+```{r}
+playas <- concacaf_lineups %>% group_by(Team,Player_Name) %>% summarise(mins_played = sum(Min,na.rm=TRUE),matchday_squads=n_distinct(Matchday))
+
+
+
+player_links_transfermarkt <- tibble(player_name=character(),team=character(),link=character())
+
+
+get_transfermarkt_links <- function(player_name,team) {
+
+  url = URLencode(glue("https://www.google.com/search?q={player_name}+{team}+transfermarkt"))
+  page <- read_html(curl(url))
+  # extract all links
+  nodes <- rvest::html_nodes(page, "a")
+  links <- rvest::html_attr(nodes,"href")
+  # extract first link of the search results
+  link <- links[startsWith(links, "/url?q=")][1]
+ # clean it
+ link <- sub("^/url\\?q\\=(.*?)\\&sa.*$","\\1", link)
+
+ link
+ 
+ player_links_transfermarkt1 <- as.tibble(cbind(player_name,team,link) )
+ 
+ player_links_transfermarkt <<- rbind( player_links_transfermarkt, player_links_transfermarkt1)
+}
+
+
+mapply(get_transfermarkt_links,playas$Player_Name,playas$Team)
+
+
+playasss <-player_links_transfermarkt %>% mutate(link1=link) %>% separate(link1, c(NA, NA, NA, "player_name1", NA, NA, "player_num", NA, NA), sep = "/") 
+
+```
+
+
+#Get Player Debuts
+
+```{r}
+player_debuts <- tibble(team=character(),player_name=character(),player_num=character(),debut = character())
+  
+
+get_debuts <- function (team,player_name,player_num)
+{
+  
+session <-  bow(glue("https://www.transfermarkt.us/{player_num}/nationalmannschaft/spieler/{player_num}"))
+
+check <- scrape(session) %>% html_nodes(".hide-for-small , .zentriert") %>% html_text()
+
+debut <- gsub("[\r\n\t]", "", check[21])
+
+ player_debuts1 <- as.tibble(cbind(team,player_name,player_num,debut) )
+ 
+  player_debuts <<- rbind( player_debuts1,  player_debuts)
+  
+
+}
+
+# Try to limit this by teams, otherwise takes 2 hours to run
+mapply(get_debuts,playasss$team,playasss$player_name,playasss$player_num)
+```
+
+
+Most debuts are there but some need manual updation
+
+```{r}
+
+#Read this on local
+player_debuts %>% write_csv("player_debuts.csv")
+
+#Edit stuff after manually searching
+
+player_debuts_usa_canada_mexico <- read_csv("/Users/rahulch/Documents/player_debuts_usa_canada_mexico.csv")
+
+
+```
+
+
+Pre-Processing
+```{r}
+
+dobs<-concacaf_lineups %>% filter(!is.na(Age)) %>% separate(Age, c("years", "days"), sep = "-") %>% mutate(dob = Matchday - dyears(as.numeric(years)) - ddays(as.numeric(days))) %>% 
+  distinct(Player_Name, Team,dob) %>% group_by(Player_Name,Team) %>% mutate(rank=row_number(dob)) %>% filter(rank==1)
+
+
+concacaf_lineups 
+
+
+playasss
+
+
+concacaf_players1<- player_debuts_usa_canada_mexico %>% mutate(debut1 = mdy(debut),
+                                           player_num = as.character(player_num)) %>%
+  left_join(playasss,by=c("player_name"="player_name1",
+                          "player_num"="player_num")) %>%
+  dplyr::select(player_name,player_num,player_name.y,debut1,team.x)
+
+
+concacaf_players <- concacaf_players1 %>% left_join(dobs,by=c("player_name.y"="Player_Name",
+                                          "team.x"="Team")) %>%
+  left_join(playas,by=c("player_name.y"="Player_Name",
+                        "team.x"="Team")) %>%
+  mutate(min_perc = (mins_played/(90*8)) %>% round(digits = 3),
+         join_age = interval(dob,debut1)/ years(1),
+         age_now = interval(dob, Sys.Date()) / years(1)) %>% filter(mins_played!=0) %>% mutate(player_name.y1=player_name.y,) %>%
+  mutate(reshape2::colsplit(player_name.y1," ",c("first_name","last_name")))
+  
+#  separate(player_name.y1,c("first_name","last_name","extra_name"),sep=" ",fill="left") 
+#%>% mutate(extra_name=ifelse(is.na(extra_name),"",extra_name),last_name=paste(last_name,extra_name,sep=""))
+concacaf_players
+```
+
+
+
+
+Graph for Canada
+
+```{r}
+
+
+canada  <- concacaf_players %>% filter(team.x=="Canada") %>%
+  ggplot(aes(x=age_now,y=min_perc)) + 
+  geom_link(aes(xend=join_age,yend=min_perc,
+                alpha = -stat(index)),lineend = "round",color="red",
+            show.legend = F) + geom_point(color="red") + 
+  geom_text_repel(aes(label = last_name), 
+                  size = 3.5, 
+                  colour = "white") +
+  labs(x = "Age",
+       title = paste0(concacaf_players %>% filter(team.x=="Canada")  %>% distinct(team.x)
+, " | Squad Age Profile"), 
+       subtitle = paste0("CONCACAF World Cup 2022 Qualification", " as of ", format(Sys.Date(),"%m/%d/%Y")),
+       caption = paste0("@rahulxc", " | Data: ", "Transfermarkt")) +
+  scale_y_continuous("Share of minutes played", 
+                     labels = scales::percent_format(accuracy = 1), 
+                     breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  expand_limits(x = c(16, 40), y = c(0, 1)) +
+  annotate("rect", 
+           xmin = 24,
+           xmax = 29,
+           ymin = -Inf,
+           ymax = 1,
+           alpha = 0.5,
+           fill = "mediumseagreen") +
+  annotate("text", 
+           x = 26.5, 
+           y = 1.05, 
+           label = "Peak Years", 
+           colour = "mediumseagreen", 
+           alpha = 0.7,
+           size = 5) + theme_minimal() +
+   theme(legend.position = "right", 
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "#141622"),
+        panel.background = element_rect(fill = "#141622", 
+                                        colour = "#141622",
+                                        size = 2, 
+                                        linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, 
+                                        linetype = 'solid',
+                                        colour = "gray30"),
+        axis.title.x = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.title.y = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.text.x = element_text(colour = "white"),
+        axis.text.y = element_text(colour = "white"),
+        plot.title = element_text(face = "bold", 
+                                  colour = "white", 
+                                  size = 14),
+        plot.subtitle = element_text(colour = "white", 
+                                     size = 10),
+        plot.caption = element_text(colour = "white", 
+                                    size = 10),
+        plot.caption.position = "plot",
+        legend.title = element_text(colour = "white", 
+                                    size = 14),
+        legend.text = element_text(colour = "white", 
+                                   size = 14))  
+
+
+logo <- image_read("https://upload.wikimedia.org/wikipedia/en/6/69/Canadian_Soccer_Association_logo.svg") 
+
+logo2 <- image_read("https://i.ibb.co/sKrMVG9/Screen-Shot-2021-12-10-at-1-13-55-PM.png")
+
+ggdraw(canada) + 
+  draw_image(logo, x = 1, y = 1, hjust = 1, vjust = 1, width = 0.13, height = 0.2) +
+  draw_image(logo2, x = 0.8, y = 0,width=0.175,height=0.4)
+
+ggsave(glue("Canada_Squad_Age_Profile.png"),width=9,height=7,path="Documents/squad_profile")
+
+```
+
+
+
+Graph for United States
+
+```{r}
+usa  <- concacaf_players %>% filter(team.x=="United States") %>%
+  ggplot(aes(x=age_now,y=min_perc)) + 
+  geom_link(aes(xend=join_age,yend=min_perc,
+                alpha = -stat(index)),lineend = "round",color="red",
+            show.legend = F) + geom_point(color="red") + 
+  geom_text_repel(aes(label = last_name), 
+                  size = 3.5, 
+                  colour = "white") +
+  labs(x = "Age",
+       title = paste0(concacaf_players %>% filter(team.x=="United States")  %>% distinct(team.x)
+, " | Squad Age Profile"), 
+       subtitle = paste0("CONCACAF World Cup 2022 Qualification", " as of ", format(Sys.Date(),"%m/%d/%Y")),
+       caption = paste0("@rahulxc", " | Data: ", "Transfermarkt")) +
+  scale_y_continuous("Share of minutes played", 
+                     labels = scales::percent_format(accuracy = 1), 
+                     breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  expand_limits(x = c(16, 40), y = c(0, 1)) +
+  annotate("rect", 
+           xmin = 24,
+           xmax = 30,
+           ymin = -Inf,
+           ymax = 1,
+           alpha = 0.5,
+           fill = "mediumseagreen") +
+  annotate("text", 
+           x = 26.5, 
+           y = 1.05, 
+           label = "Peak Years", 
+           colour = "mediumseagreen", 
+           alpha = 0.7,
+           size = 5) + theme_minimal() +
+   theme(legend.position = "right", 
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "#141622"),
+        panel.background = element_rect(fill = "#141622", 
+                                        colour = "#141622",
+                                        size = 2, 
+                                        linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, 
+                                        linetype = 'solid',
+                                        colour = "gray30"),
+        axis.title.x = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.title.y = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.text.x = element_text(colour = "white"),
+        axis.text.y = element_text(colour = "white"),
+        plot.title = element_text(face = "bold", 
+                                  colour = "white", 
+                                  size = 14),
+        plot.subtitle = element_text(colour = "white", 
+                                     size = 10),
+        plot.caption = element_text(colour = "white", 
+                                    size = 10),
+        plot.caption.position = "plot",
+        legend.title = element_text(colour = "white", 
+                                    size = 14),
+        legend.text = element_text(colour = "white", 
+                                   size = 14))  
+
+
+
+logo <- image_read("https://upload.wikimedia.org/wikipedia/commons/thumb/1/17/United_States_Soccer_Federation_logo_2016.svg/1495px-United_States_Soccer_Federation_logo_2016.svg.png") 
+
+
+logo2 <- image_read("https://i.ibb.co/sKrMVG9/Screen-Shot-2021-12-10-at-1-13-55-PM.png")
+
+ggdraw(usa) + 
+  draw_image(logo, x = 1, y = 1, hjust = 1, vjust = 1, width = 0.13, height = 0.2) +
+  draw_image(logo2, x = 0.8, y = 0,width=0.175,height=0.4)
+
+
+ggsave(glue("USA_Squad_Age_Profile.png"),width=9,height=7,path="Documents/squad_profile")
+
+
+```
+
+Graph for Mexico
+
+```{r}
+
+mexico  <- concacaf_players %>% filter(team.x=="Mexico") %>%
+  ggplot(aes(x=age_now,y=min_perc)) + 
+  geom_link(aes(xend=join_age,yend=min_perc,
+                alpha = -stat(index)),lineend = "round",color="red",
+            show.legend = F) + geom_point(color="red") + 
+  geom_text_repel(aes(label = last_name), 
+                  size = 3.5, 
+                  colour = "white") +
+  labs(x = "Age",
+       title = paste0(concacaf_players %>% filter(team.x=="Mexico")  %>% distinct(team.x)
+, " | Squad Age Profile"), 
+       subtitle = paste0("CONCACAF World Cup 2022 Qualification", " as of ", format(Sys.Date(),"%m/%d/%Y")),
+       caption = paste0("@rahulxc", " | Data: ", "Transfermarkt")) +
+  scale_y_continuous("Share of minutes played", 
+                     labels = scales::percent_format(accuracy = 1), 
+                     breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1)) +
+  expand_limits(x = c(16, 40), y = c(0, 1)) +
+  annotate("rect", 
+           xmin = 24,
+           xmax = 29,
+           ymin = -Inf,
+           ymax = 1,
+           alpha = 0.5,
+           fill = "mediumseagreen") +
+  annotate("text", 
+           x = 26.5, 
+           y = 1.05, 
+           label = "Peak Years", 
+           colour = "mediumseagreen", 
+           alpha = 0.7,
+           size = 5) + theme_minimal() +
+   theme(legend.position = "right", 
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "#141622"),
+        panel.background = element_rect(fill = "#141622", 
+                                        colour = "#141622",
+                                        size = 2, 
+                                        linetype = "solid"),
+        panel.grid.major = element_line(size = 0.5, 
+                                        linetype = 'solid',
+                                        colour = "gray30"),
+        axis.title.x = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.title.y = element_text(size = 13, 
+                                    face = "bold", 
+                                    colour = "white"),
+        axis.text.x = element_text(colour = "white"),
+        axis.text.y = element_text(colour = "white"),
+        plot.title = element_text(face = "bold", 
+                                  colour = "white", 
+                                  size = 14),
+        plot.subtitle = element_text(colour = "white", 
+                                     size = 10),
+        plot.caption = element_text(colour = "white", 
+                                    size = 10),
+        plot.caption.position = "plot",
+        legend.title = element_text(colour = "white", 
+                                    size = 14),
+        legend.text = element_text(colour = "white", 
+                                   size = 14))  
+
+
+
+logo <- image_read("https://upload.wikimedia.org/wikipedia/en/thumb/b/ba/Mexico_FA.svg/1024px-Mexico_FA.svg.png") 
+
+logo2 <- image_read("https://i.ibb.co/sKrMVG9/Screen-Shot-2021-12-10-at-1-13-55-PM.png")
+
+ggdraw(mexico) + 
+  draw_image(logo, x = 1, y = 1, hjust = 1, vjust = 1, width = 0.13, height = 0.2) +
+  draw_image(logo2, x = 0.8, y = 0,width=0.175,height=0.4)
+
+ggsave(glue("Mexico_Squad_Age_Profile.png"),width=9,height=7,path="Documents/squad_profile")
+
+```
+
